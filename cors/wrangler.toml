@@ -4,3 +4,12 @@ type = "webpack"
 route = "cors.eu.org/*"
 workers_dev = false
 zone_id = "c026ed83583885087a863bf454b68a69"
+
+# 可选：客户端 IP 白名单。未配置或空数组时放行所有 IP。
+# 支持 IPv4 / IPv6 单 IP 与 CIDR。
+# JSON 数组格式（推荐）：
+# [vars]
+# ipWhitelist = '["1.2.3.4", "10.0.0.0/8", "2001:db8::/32"]'
+#
+# 也支持逗号分隔：
+# ipWhitelist = "1.2.3.4,10.0.0.0/8,2001:db8::1"

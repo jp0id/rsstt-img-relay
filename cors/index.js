@@ -30,6 +30,9 @@ const config = {
     // blockList: [".m3u8", ".ts", ".acc", ".m4s", "photocall.tv", "googlevideo.com", "liveradio.ie"],
     blockList: [],
     typeList: ["image", "video", "audio", "application", "font", "model"],
+    // 客户端 IP 白名单，未配置或空数组表示放行所有
+    // 支持 IPv4 / IPv6 单 IP 与 CIDR，例如 ["1.2.3.4", "10.0.0.0/8", "2001:db8::/32"]
+    ipWhitelist: [],
 };
 
 /**
@@ -38,8 +41,18 @@ const config = {
  */
 function setConfig(env) {
     Object.keys(config).forEach((k) => {
-        if (env[k])
-            config[k] = typeof config[k] === 'string' ? env[k] : JSON.parse(env[k]);
+        if (env[k]) {
+            try {
+                config[k] = typeof config[k] === 'string' ? env[k] : JSON.parse(env[k]);
+            } catch {
+                // 数组默认值遇到非 JSON 输入时，按逗号分隔降级解析
+                if (Array.isArray(config[k])) {
+                    config[k] = env[k].split(',').map((s) => s.trim()).filter(Boolean);
+                } else {
+                    throw new Error(`Invalid value for config.${k}: ${env[k]}`);
+                }
+            }
+        }
     });
 }
 
@@ -60,6 +73,7 @@ async function fetchHandler(request, env, ctx) {
             "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
             "Access-Control-Allow-Headers": reqHeaders.get('Access-Control-Allow-Headers') || "Accept, Authorization, Cache-Control, Content-Type, DNT, If-Modified-Since, Keep-Alive, Origin, User-Agent, X-Requested-With, Token, x-access-token"
         });
+    let ipBlocked = false;
 
     try {
         const urlMatch = request.url.match(RegExp(config.URLRegExp));
@@ -80,7 +94,19 @@ async function fetchHandler(request, env, ctx) {
             outCt = "application/json";
             outStatus = invalid ? 400 : 200;
         }
-        //阻断
+        //阻断 - IP 白名单
+        else if (config.ipWhitelist && config.ipWhitelist.length > 0
+            && !ipAllowed(reqHeaders.get('cf-connecting-ip'), config.ipWhitelist)) {
+            const clientIp = reqHeaders.get('cf-connecting-ip') || 'unknown';
+            outBody = JSON.stringify({
+                code: 403,
+                msg: 'Your IP ' + clientIp + ' is not in the IP whitelist of this proxy.'
+            });
+            outCt = "application/json";
+            outStatus = 403;
+            ipBlocked = true;
+        }
+        //阻断 - URL 黑名单
         else if (blockUrl(url)) {
             outBody = JSON.stringify({
                 code: 403,
@@ -180,7 +206,7 @@ async function fetchHandler(request, env, ctx) {
     })
 
     //日志接口
-    if (config.sematextToken != "00000000-0000-0000-0000-000000000000") {
+    if (config.sematextToken != "00000000-0000-0000-0000-000000000000" && !ipBlocked) {
         sematext.add(ctx, request, response);
     }
 
@@ -268,6 +294,105 @@ const sematext = {
         event.waitUntil(fetch(url, body))
     }
 };
+
+/**
+ * IP 白名单匹配工具
+ * 支持 IPv4 / IPv6 单 IP 与 CIDR（如 1.2.3.4、10.0.0.0/24、2001:db8::1、2001:db8::/32）
+ */
+
+// 把 IPv4 字符串解析为 32-bit 无符号整数；非法返回 null
+function ipv4ToInt(ip) {
+    const m = ip.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (!m) return null;
+    const o = m.slice(1).map(Number);
+    if (o.some((x) => x > 255)) return null;
+    return ((o[0] << 24) | (o[1] << 16) | (o[2] << 8) | o[3]) >>> 0;
+}
+
+// 把 IPv6 字符串展开为 8 个 16-bit 段；非法抛错
+function expandIpv6(ip) {
+    const dci = ip.indexOf('::');
+    let parts;
+    if (dci >= 0) {
+        const left = ip.slice(0, dci).split(':').filter(Boolean);
+        const right = ip.slice(dci + 2).split(':').filter(Boolean);
+        const missing = 8 - left.length - right.length;
+        if (missing < 0) throw new Error('invalid ipv6');
+        parts = [...left, ...Array(missing).fill('0'), ...right];
+    } else {
+        parts = ip.split(':');
+    }
+    if (parts.length !== 8) throw new Error('invalid ipv6');
+    return parts.map((p) => {
+        const n = parseInt(p || '0', 16);
+        if (isNaN(n) || n < 0 || n > 0xffff) throw new Error('invalid ipv6 segment');
+        return n;
+    });
+}
+
+// 把 8 个 16-bit 段拼成 BigInt
+function ipv6ToBigInt(parts) {
+    let n = 0n;
+    for (const p of parts) n = (n << 16n) | BigInt(p);
+    return n;
+}
+
+// 解析 CIDR 条目为 {family, addr, prefix}；非法返回 null
+function parseCidr(entry) {
+    const slashIdx = entry.indexOf('/');
+    const addr = slashIdx >= 0 ? entry.slice(0, slashIdx) : entry;
+    const prefix = slashIdx >= 0 ? parseInt(entry.slice(slashIdx + 1), 10) : null;
+
+    const v4 = ipv4ToInt(addr);
+    if (v4 !== null) {
+        const p = prefix === null ? 32 : prefix;
+        if (isNaN(p) || p < 0 || p > 32) return null;
+        return { family: 4, addr: v4, prefix: p };
+    }
+
+    if (addr.includes(':')) {
+        try {
+            const parts = expandIpv6(addr);
+            const p = prefix === null ? 128 : prefix;
+            if (isNaN(p) || p < 0 || p > 128) return null;
+            return { family: 6, addr: ipv6ToBigInt(parts), prefix: p };
+        } catch {
+            return null;
+        }
+    }
+
+    return null;
+}
+
+// 判断 clientIp 是否匹配白名单中任意一条
+function ipAllowed(clientIp, whitelist) {
+    if (!clientIp) return false;
+    for (const entry of whitelist) {
+        const cidr = parseCidr(entry);
+        if (!cidr) continue;
+
+        if (cidr.family === 4) {
+            const ip = ipv4ToInt(clientIp);
+            if (ip === null) continue;
+            if (cidr.prefix === 0) return true;
+            const mask = cidr.prefix === 32 ? 0xffffffff : ((~0 << (32 - cidr.prefix)) >>> 0);
+            return (ip & mask) === (cidr.addr & mask);
+        } else {
+            let parts;
+            try {
+                parts = expandIpv6(clientIp);
+            } catch {
+                continue;
+            }
+            const ip = ipv6ToBigInt(parts);
+            if (cidr.prefix === 0) return true;
+            // 生成高 prefix 位为 1、低 (128-prefix) 位为 0 的 BigInt 掩码
+            const mask = ((1n << BigInt(cidr.prefix)) - 1n) << BigInt(128 - cidr.prefix);
+            return (ip & mask) === (cidr.addr & mask);
+        }
+    }
+    return false;
+}
 
 export default {
     fetch: fetchHandler

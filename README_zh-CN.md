@@ -19,6 +19,36 @@ var $url = "http://wthrcdn.etouch.cn/weather_mini?citykey=101040100";
 fetch("https://example.com/" + $url).then(x => x.text()).then(console.log)
 ```
 
+### IP 白名单
+为防止滥用，可通过 `ipWhitelist` 环境变量将代理限制在一组客户端 IP 之内。未设置（或为空数组）时放行所有 IP。
+
+支持 IPv4 / IPv6 单 IP 与 CIDR：
+- `1.2.3.4`
+- `10.0.0.0/24`
+- `2001:db8::1`
+- `2001:db8::/32`
+
+#### wrangler
+在 `wrangler.toml` 中新增 `[vars]` 段：
+```toml
+[vars]
+# JSON 数组（推荐）
+ipWhitelist = '["1.2.3.4", "10.0.0.0/8", "2001:db8::/32"]'
+# 也支持逗号分隔：
+# ipWhitelist = "1.2.3.4,10.0.0.0/8,2001:db8::1"
+```
+
+#### Cloudflare 仪表板
+Workers -> 选择你的服务 -> Settings -> Variables -> Add variable
+- 变量名：`ipWhitelist`
+- 值：JSON 数组字符串，例如 `["1.2.3.4", "10.0.0.0/8", "2001:db8::/32"]`
+
+客户端 IP 不匹配时，代理返回 HTTP 403：
+```json
+{ "code": 403, "msg": "Your IP 1.2.3.4 is not in the IP whitelist of this proxy." }
+```
+被拒绝的请求**不会**被转发，也**不会**上报到 Sematext，攻击者 IP 不会泄漏到第三方日志。
+
 ### 部署
 
 > 两种方法的工作原理一致
@@ -57,6 +87,14 @@ fetch("https://example.com/" + $url).then(x => x.text()).then(console.log)
 `https://example.com/{URL}`
 - `https://example.com/https://api.github.com`
 - `https://example.com/http://nginx.org/download/nginx-1.20.2.tar.gz`
+
+### IP 白名单
+行为与上面的 Workers 版本一致——在 Pages 项目中设置 `ipWhitelist` 环境变量即可：
+- Pages 仪表板 -> 选择项目 -> Settings -> Environment variables -> Add variable
+  - 变量名：`ipWhitelist`
+  - 值：JSON 数组字符串，例如 `["1.2.3.4", "10.0.0.0/8", "2001:db8::/32"]`
+
+默认白名单为空，放行所有 IP。
 
 ### 部署
 
